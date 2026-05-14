@@ -1,27 +1,26 @@
 import io
 import os
 import re
-import zipfile
 from dataclasses import dataclass
 from typing import List, Sequence
-from xml.etree import ElementTree as ET
 
 import streamlit as st
 from google import genai
 from google.genai import types
+from pypdf import PdfReader
 
 
 APP_TITLE = "Module 2 Chatbot"
-DEFAULT_DOCX_CANDIDATES = [
-    "/Users/dharmarajrathod/Downloads/Module 2 - Revised.docx",
-    os.path.join(os.path.dirname(__file__), "Module 2 - Revised.docx"),
-    os.path.join(os.path.dirname(__file__), "module2.docx"),
+DEFAULT_PDF_CANDIDATES = [
+    "/Users/dharmarajrathod/Downloads/Module 2 - Revised.pdf",
+    os.path.join(os.path.dirname(__file__), "Module 2 - Revised.pdf"),
+    os.path.join(os.path.dirname(__file__), "module2.pdf"),
 ]
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 SYSTEM_PROMPT = (
     "You are PA Coach, a training chatbot based strictly on Module 2 Clinical "
     "Documentation That Gets Approved content. Only answer using the provided "
-    "DOCX context. Do not use external knowledge. Do not generate or assume "
+    "PDF context. Do not use external knowledge. Do not generate or assume "
     "clinical facts. Always enforce documentation verification, chart review, "
     "and evidence verification before submission."
 )
@@ -52,7 +51,6 @@ STOPWORDS = {
     "help", "hi", "how", "i", "in", "is", "me", "module", "of", "please",
     "summarize", "summary", "tell", "the", "there", "to", "what",
 }
-WORD_NAMESPACE = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 
 
 @dataclass
@@ -75,27 +73,20 @@ def normalize_text(text: str) -> str:
     return cleaned.strip()
 
 
-def extract_text_from_docx_bytes(docx_bytes: bytes) -> str:
-    with zipfile.ZipFile(io.BytesIO(docx_bytes)) as archive:
-        document_xml = archive.read("word/document.xml")
-    return extract_text_from_document_xml(document_xml)
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    pages = []
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+    return normalize_text("\n".join(pages))
 
 
-def extract_text_from_docx_path(docx_path: str) -> str:
-    with zipfile.ZipFile(docx_path) as archive:
-        document_xml = archive.read("word/document.xml")
-    return extract_text_from_document_xml(document_xml)
-
-
-def extract_text_from_document_xml(document_xml: bytes) -> str:
-    root = ET.fromstring(document_xml)
-    paragraphs = []
-    for paragraph in root.findall(".//w:p", WORD_NAMESPACE):
-        text_nodes = [node.text for node in paragraph.findall(".//w:t", WORD_NAMESPACE) if node.text]
-        paragraph_text = " ".join(text_nodes).strip()
-        if paragraph_text:
-            paragraphs.append(paragraph_text)
-    return normalize_text("\n".join(paragraphs))
+def extract_text_from_pdf_path(pdf_path: str) -> str:
+    reader = PdfReader(pdf_path)
+    pages = []
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+    return normalize_text("\n".join(pages))
 
 
 def tokenize(text: str) -> set[str]:
@@ -231,7 +222,7 @@ def build_grounded_prompt(user_query: str, context_chunks: Sequence[Chunk], hist
         f"[Module Chunk {chunk.index + 1}]\n{chunk.text}" for chunk in context_chunks
     )
     context_block = (
-        "Use only the following DOCX excerpts as your knowledge source.\n\n"
+        "Use only the following PDF excerpts as your knowledge source.\n\n"
         f"{context_text}\n\n"
         "If the user asks for case-specific or missing patient/provider record details "
         f"that are not in these excerpts, reply exactly with: \"{MISSING_INFO}\"\n"
@@ -274,32 +265,32 @@ def format_api_error(exc: Exception) -> str:
 
 
 def load_knowledge_base_from_upload(uploaded_file) -> None:
-    docx_bytes = uploaded_file.getvalue()
-    extracted_text = extract_text_from_docx_bytes(docx_bytes)
+    pdf_bytes = uploaded_file.getvalue()
+    extracted_text = extract_text_from_pdf_bytes(pdf_bytes)
     if not extracted_text:
-        raise ValueError("No text could be extracted from the uploaded DOCX.")
+        raise ValueError("No text could be extracted from the uploaded PDF.")
     st.session_state.knowledge_text = extracted_text
     st.session_state.knowledge_chunks = split_into_chunks(extracted_text)
     st.session_state.knowledge_label = uploaded_file.name
     st.session_state.messages = []
 
 
-def load_knowledge_base_from_default_path(docx_path: str) -> None:
-    extracted_text = extract_text_from_docx_path(docx_path)
+def load_knowledge_base_from_default_path(pdf_path: str) -> None:
+    extracted_text = extract_text_from_pdf_path(pdf_path)
     if not extracted_text:
-        raise ValueError("No text could be extracted from the default DOCX.")
+        raise ValueError("No text could be extracted from the default PDF.")
     st.session_state.knowledge_text = extracted_text
     st.session_state.knowledge_chunks = split_into_chunks(extracted_text)
-    st.session_state.knowledge_label = os.path.basename(docx_path)
+    st.session_state.knowledge_label = os.path.basename(pdf_path)
     st.session_state.messages = []
 
 
-def ensure_default_docx_loaded() -> None:
+def ensure_default_pdf_loaded() -> None:
     if st.session_state.knowledge_chunks:
         return
-    for docx_path in DEFAULT_DOCX_CANDIDATES:
-        if os.path.exists(docx_path):
-            load_knowledge_base_from_default_path(docx_path)
+    for pdf_path in DEFAULT_PDF_CANDIDATES:
+        if os.path.exists(pdf_path):
+            load_knowledge_base_from_default_path(pdf_path)
             return
 
 
@@ -308,17 +299,17 @@ def main() -> None:
     init_session_state()
 
     try:
-        ensure_default_docx_loaded()
+        ensure_default_pdf_loaded()
     except Exception as exc:
         st.session_state.knowledge_chunks = []
         st.session_state.knowledge_label = None
-        st.error(f"Default DOCX load failed: {exc}")
+        st.error(f"Default PDF load failed: {exc}")
 
     st.title("PA Coach")
     st.write(
         "Ask questions about Module 2 clinical documentation, medical necessity, "
         "SBAR letters, and evidence-tool use. This assistant uses only the loaded "
-        "Module 2 document."
+        "Module 2 PDF."
     )
     st.caption(
         f"Knowledge source: `{st.session_state.knowledge_label or 'Not loaded'}` | "
@@ -329,14 +320,14 @@ def main() -> None:
         st.warning("Set the GEMINI_API_KEY or GOOGLE_API_KEY environment variable before starting a chat.")
 
     if not st.session_state.knowledge_chunks:
-        st.info("Upload the Module 2 DOCX to begin, or add the DOCX file to the app repository.")
-        uploaded_file = st.file_uploader("Upload Module 2 DOCX", type=["docx"])
+        st.info("Upload the Module 2 PDF to begin, or add the PDF file to the app repository.")
+        uploaded_file = st.file_uploader("Upload Module 2 PDF", type=["pdf"])
         if uploaded_file is not None:
             try:
                 load_knowledge_base_from_upload(uploaded_file)
                 st.rerun()
             except Exception as exc:
-                st.error(f"Unable to load uploaded DOCX: {exc}")
+                st.error(f"Unable to load uploaded PDF: {exc}")
         return
 
     for message in st.session_state.messages:
