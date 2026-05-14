@@ -14,7 +14,6 @@ APP_TITLE = "Module 2 Chatbot"
 DEFAULT_PDF_CANDIDATES = [
     "/Users/dharmarajrathod/Downloads/Module 2 - Revised.pdf",
     os.path.join(os.path.dirname(__file__), "Module 2 - Revised.pdf"),
-    os.path.join(os.path.dirname(__file__), "module2.pdf"),
 ]
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 SYSTEM_PROMPT = (
@@ -113,7 +112,8 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CH
         end = min(len(text), start + chunk_size)
         chunk_text = text[start:end].strip()
         if chunk_text:
-            chunks.append(Chunk(text=chunk_text, tokens=tokenize(chunk_text), index=index))
+            chunks.append(
+                Chunk(text=chunk_text, tokens=tokenize(chunk_text), index=index))
             index += 1
         if end >= len(text):
             break
@@ -159,7 +159,8 @@ def build_extractive_fallback(query: str, context_chunks: Sequence[Chunk]) -> st
             scored_sentences.append((score, sentence))
 
     if not scored_sentences:
-        excerpt = context_chunks[0].text[:500].strip() if context_chunks else ""
+        excerpt = context_chunks[0].text[:500].strip(
+        ) if context_chunks else ""
         if not excerpt:
             return OUT_OF_SCOPE
         return f"Based on Module 2:\n\n{excerpt}..."
@@ -241,7 +242,8 @@ def build_grounded_prompt(user_query: str, context_chunks: Sequence[Chunk], hist
 
 
 def ask_pa_coach(user_query: str, context_chunks: Sequence[Chunk], history: Sequence[dict]) -> str:
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+    client = genai.Client(api_key=os.getenv(
+        "GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
     response = client.models.generate_content(
         model=DEFAULT_MODEL,
         contents=build_grounded_prompt(user_query, context_chunks, history),
@@ -317,10 +319,12 @@ def main() -> None:
     )
 
     if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
-        st.warning("Set the GEMINI_API_KEY or GOOGLE_API_KEY environment variable before starting a chat.")
+        st.warning(
+            "Set the GEMINI_API_KEY or GOOGLE_API_KEY environment variable before starting a chat.")
 
     if not st.session_state.knowledge_chunks:
-        st.info("Upload the Module 2 PDF to begin, or add the PDF file to the app repository.")
+        st.info(
+            "Upload the Module 2 PDF to begin, or add the PDF file to the app repository.")
         uploaded_file = st.file_uploader("Upload Module 2 PDF", type=["pdf"])
         if uploaded_file is not None:
             try:
@@ -343,7 +347,8 @@ def main() -> None:
         st.warning("Enter a question to continue.")
         return
 
-    st.session_state.messages.append({"role": "user", "content": cleaned_query})
+    st.session_state.messages.append(
+        {"role": "user", "content": cleaned_query})
     with st.chat_message("user"):
         st.markdown(cleaned_query)
 
@@ -352,7 +357,8 @@ def main() -> None:
     elif is_greeting_or_smalltalk(cleaned_query):
         assistant_reply = WELCOME_MESSAGE
     else:
-        relevant_chunks = retrieve_relevant_chunks(cleaned_query, st.session_state.knowledge_chunks)
+        relevant_chunks = retrieve_relevant_chunks(
+            cleaned_query, st.session_state.knowledge_chunks)
         if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
             assistant_reply = "Gemini API key not configured. Set GEMINI_API_KEY or GOOGLE_API_KEY and try again."
         else:
@@ -365,12 +371,14 @@ def main() -> None:
             except Exception as exc:
                 assistant_reply = format_api_error(exc)
                 if assistant_reply == GENERIC_API_ERROR:
-                    assistant_reply = build_extractive_fallback(cleaned_query, relevant_chunks)
+                    assistant_reply = build_extractive_fallback(
+                        cleaned_query, relevant_chunks)
 
         if assistant_reply == OUT_OF_SCOPE and asks_for_case_specific_details(cleaned_query):
             assistant_reply = MISSING_INFO
 
-    st.session_state.messages.append({"role": "assistant", "content": assistant_reply})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": assistant_reply})
     with st.chat_message("assistant"):
         st.markdown(assistant_reply)
 
