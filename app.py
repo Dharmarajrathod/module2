@@ -3,7 +3,7 @@ import os
 import re
 import zipfile
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 from xml.etree import ElementTree as ET
 
 import streamlit as st
@@ -44,9 +44,8 @@ GENERIC_API_ERROR = (
     "The chatbot could not get a response from Gemini right now. Please try again."
 )
 MAX_CHUNKS = 4
-CHUNK_SIZE = 1200
+CHUNK_SIZE = 1800
 CHUNK_OVERLAP = 200
-MAX_FALLBACK_SENTENCES = 5
 USE_GEMINI = os.getenv("MODULE2_USE_GEMINI", "false").lower() == "true"
 STOPWORDS = {
     "a", "about", "an", "and", "are", "can", "does", "for", "give", "hello",
@@ -55,6 +54,17 @@ STOPWORDS = {
 }
 WORD_NAMESPACE = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+SECTION_HEADING_PATTERNS = [
+    r"^MICRO MODULE \d",
+    r"^AI TOOL DEMONSTRATION:",
+    r"^CASE STUDY (?:EASY|HARD):",
+    r"^Role Play:",
+    r"^Quiz$",
+    r"^Instructional Designer Notes$",
+    r"^[A-Z][A-Za-z0-9 ,.&/\-]+ PA Requirements$",
+    r"^Module Essence:",
+    r"^Key Takeaways$",
+]
 
 
 @dataclass
@@ -117,10 +127,6 @@ def meaningful_tokens(text: str) -> set[str]:
     return {token for token in tokenize(text) if token not in STOPWORDS}
 
 
-def normalize_phrase(text: str) -> str:
-    return re.sub(r"[^a-z0-9\s]", " ", text.lower()).strip()
-
-
 def ordered_meaningful_tokens(text: str) -> List[str]:
     return [
         token for token in re.findall(r"[a-z0-9]{2,}", text.lower())
@@ -128,9 +134,32 @@ def ordered_meaningful_tokens(text: str) -> List[str]:
     ]
 
 
-def split_sentences(text: str) -> List[str]:
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    return [sentence.strip() for sentence in sentences if sentence.strip()]
+def expand_query_tokens(tokens: set[str]) -> set[str]:
+    expanded = set(tokens)
+    if "documentation" in expanded:
+        expanded.add("requirements")
+    if "requirements" in expanded:
+        expanded.add("documentation")
+    if "sbar" in expanded:
+        expanded.add("framework")
+    if "trial" in expanded:
+        expanded.add("evidence")
+    return expanded
+
+
+def normalize_phrase(text: str) -> str:
+    return re.sub(r"[^a-z0-9\s]", " ", text.lower()).strip()
+
+
+def is_section_heading(line: str) -> bool:
+    return any(re.match(pattern, line) for pattern in SECTION_HEADING_PATTERNS)
+
+
+def requested_specialty(tokens: set[str]) -> Optional[str]:
+    for specialty in ("oncology", "cardiology", "neurology", "behavioral"):
+        if specialty in tokens:
+            return specialty
+    return None
 
 
 def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[Chunk]:
@@ -138,49 +167,57 @@ def split_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CH
         return []
 
     paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
+    sections: List[str] = []
+    current_section: List[str] = []
+
+    for line in paragraphs:
+        if current_section and is_section_heading(line):
+            sections.append("\n\n".join(current_section))
+            current_section = [line]
+            continue
+        current_section.append(line)
+
+    if current_section:
+        sections.append("\n\n".join(current_section))
+
     chunks: List[Chunk] = []
     index = 0
-    current_parts: List[str] = []
-    current_length = 0
 
-    for paragraph in paragraphs:
-        paragraph_length = len(paragraph)
-        projected_length = current_length + paragraph_length + (2 if current_parts else 0)
-        if current_parts and projected_length > chunk_size:
-            chunk_text = "\n\n".join(current_parts).strip()
-            chunks.append(Chunk(text=chunk_text, tokens=tokenize(chunk_text), index=index))
+    for section in sections:
+        if len(section) <= chunk_size:
+            chunks.append(Chunk(text=section, tokens=tokenize(section), index=index))
             index += 1
+            continue
 
-            if overlap > 0:
-                overlap_parts: List[str] = []
-                overlap_length = 0
-                for prior_paragraph in reversed(current_parts):
-                    addition = len(prior_paragraph) + (2 if overlap_parts else 0)
-                    if overlap_parts and overlap_length + addition > overlap:
-                        break
-                    overlap_parts.insert(0, prior_paragraph)
-                    overlap_length += addition
-                current_parts = overlap_parts
-                current_length = overlap_length
-            else:
+        section_lines = [line.strip() for line in section.splitlines() if line.strip()]
+        current_parts: List[str] = []
+        current_length = 0
+        for paragraph in section_lines:
+            projected_length = current_length + len(paragraph) + (2 if current_parts else 0)
+            if current_parts and projected_length > chunk_size:
+                chunk_text = "\n\n".join(current_parts).strip()
+                chunks.append(Chunk(text=chunk_text, tokens=tokenize(chunk_text), index=index))
+                index += 1
                 current_parts = []
                 current_length = 0
 
-        if current_parts:
-            current_length += 2
-        current_parts.append(paragraph)
-        current_length += paragraph_length
+            if current_parts:
+                current_length += 2
+            current_parts.append(paragraph)
+            current_length += len(paragraph)
 
-    if current_parts:
-        chunk_text = "\n\n".join(current_parts).strip()
-        chunks.append(Chunk(text=chunk_text, tokens=tokenize(chunk_text), index=index))
+        if current_parts:
+            chunk_text = "\n\n".join(current_parts).strip()
+            chunks.append(Chunk(text=chunk_text, tokens=tokenize(chunk_text), index=index))
+            index += 1
 
     return chunks
 
 
 def retrieve_relevant_chunks(query: str, chunks: Sequence[Chunk], limit: int = MAX_CHUNKS) -> List[Chunk]:
-    query_tokens = meaningful_tokens(query) or tokenize(query)
+    query_tokens = expand_query_tokens(meaningful_tokens(query) or tokenize(query))
     keyword_phrase = " ".join(ordered_meaningful_tokens(query))
+    specialty = requested_specialty(query_tokens)
     if not query_tokens:
         return list(chunks[:limit])
 
@@ -191,14 +228,35 @@ def retrieve_relevant_chunks(query: str, chunks: Sequence[Chunk], limit: int = M
             continue
         coverage = overlap / max(len(query_tokens), 1)
         density = overlap / max(len(chunk.tokens), 1)
-        chunk_text_lower = chunk.text.lower()
+        lines = [line.strip() for line in chunk.text.splitlines() if line.strip()]
+        heading = lines[0] if lines else ""
+        heading_tokens = meaningful_tokens(heading) or tokenize(heading)
+        heading_overlap = len(query_tokens & heading_tokens) / max(len(query_tokens), 1)
+        best_line_overlap = 0.0
+        for line in lines[:12]:
+            line_tokens = meaningful_tokens(line) or tokenize(line)
+            best_line_overlap = max(
+                best_line_overlap,
+                len(query_tokens & line_tokens) / max(len(query_tokens), 1),
+            )
+
         normalized_query = normalize_phrase(keyword_phrase)
+        normalized_heading = normalize_phrase(heading)
         phrase_bonus = 0.0
         if normalized_query and normalized_query in normalize_phrase(chunk.text):
             phrase_bonus += 0.2
-        if normalized_query and re.search(rf"(^|\n\n){re.escape(normalized_query)}($|\n\n)", chunk_text_lower):
+        if normalized_query and normalized_heading.startswith(normalized_query):
             phrase_bonus += 0.25
-        score = (coverage * 0.8) + (density * 0.2) + phrase_bonus
+        if specialty and specialty in normalized_heading and "requirements" in normalized_heading:
+            phrase_bonus += 0.4
+
+        score = (
+            (coverage * 0.45)
+            + (density * 0.1)
+            + (heading_overlap * 0.3)
+            + (best_line_overlap * 0.15)
+            + phrase_bonus
+        )
         scored.append((score, chunk))
 
     scored.sort(key=lambda item: (item[0], -item[1].index), reverse=True)
@@ -211,18 +269,61 @@ def build_extractive_fallback(query: str, context_chunks: Sequence[Chunk]) -> st
     if not context_chunks:
         return OUT_OF_SCOPE
 
-    primary_chunk = context_chunks[0]
-    excerpt = primary_chunk.text.strip()
-    if not excerpt:
-        excerpt = context_chunks[1].text[:700].strip() if len(context_chunks) > 1 else ""
-        if not excerpt:
-            return OUT_OF_SCOPE
-        return f"Based on Module 2:\n\n{excerpt}..."
+    query_tokens = expand_query_tokens(meaningful_tokens(query) or tokenize(query))
+    specialty = requested_specialty(query_tokens)
+    if specialty:
+        for chunk in context_chunks:
+            heading = next((line.strip() for line in chunk.text.splitlines() if line.strip()), "")
+            normalized_heading = normalize_phrase(heading)
+            if specialty in normalized_heading and "requirements" in normalized_heading:
+                excerpt, _ = extract_relevant_excerpt(query, chunk.text)
+                if excerpt:
+                    return f"Based on Module 2 (chunk {chunk.index + 1}):\n\n{excerpt}"
 
-    chunk_label = primary_chunk.index + 1
+    ranked_excerpts = []
+    for chunk in context_chunks:
+        excerpt, excerpt_score = extract_relevant_excerpt(query, chunk.text)
+        if excerpt:
+            ranked_excerpts.append((excerpt_score, chunk, excerpt))
+
+    if not ranked_excerpts:
+        return OUT_OF_SCOPE
+
+    ranked_excerpts.sort(key=lambda item: (item[0], -item[1].index), reverse=True)
+    _, primary_chunk, excerpt = ranked_excerpts[0]
     if len(excerpt) > 1800:
         excerpt = excerpt[:1800].rstrip() + "..."
-    return f"Based on Module 2 (chunk {chunk_label}):\n\n{excerpt}"
+    return f"Based on Module 2 (chunk {primary_chunk.index + 1}):\n\n{excerpt}"
+
+
+def extract_relevant_excerpt(query: str, text: str, window: int = 8) -> tuple[str, float]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "", -1.0
+
+    query_tokens = expand_query_tokens(meaningful_tokens(query) or tokenize(query))
+    keyword_phrase = " ".join(ordered_meaningful_tokens(query))
+    best_index = 0
+    best_score = -1.0
+
+    for i, line in enumerate(lines):
+        line_tokens = meaningful_tokens(line) or tokenize(line)
+        overlap = len(query_tokens & line_tokens)
+        score = overlap / max(len(query_tokens), 1)
+        normalized_line = normalize_phrase(line)
+        if keyword_phrase and keyword_phrase in normalized_line:
+            score += 0.5
+        if normalized_line == normalize_phrase(keyword_phrase):
+            score += 0.75
+        if i == 0:
+            score += 0.15
+        if score > best_score:
+            best_score = score
+            best_index = i
+
+    start = max(best_index - 2, 0)
+    end = min(best_index + window, len(lines))
+    return "\n\n".join(lines[start:end]).strip(), best_score
 
 
 def likely_contains_phi(text: str) -> bool:
@@ -275,9 +376,6 @@ def build_grounded_prompt(user_query: str, context_chunks: Sequence[Chunk], hist
     context_block = (
         "Use only the following document excerpts as your knowledge source.\n\n"
         f"{context_text}\n\n"
-        "Answer only from these excerpts. If the answer is supported, summarize it "
-        "plainly and mention the relevant chunk number or numbers. Do not infer "
-        "missing facts or fill gaps from general knowledge.\n"
         "If the user asks for case-specific or missing patient/provider record details "
         f"that are not in these excerpts, reply exactly with: \"{MISSING_INFO}\"\n"
         "If the question is outside Module 2 or not supported by these excerpts, reply "
@@ -357,10 +455,10 @@ def main() -> None:
     )
     st.caption(
         f"Knowledge source: `{st.session_state.knowledge_label or 'Not loaded'}` | "
-        f"Answer mode: `{'Gemini grounded rewrite' if USE_GEMINI else 'Document extractive'}`"
+        f"Active model: `{DEFAULT_MODEL}`"
     )
 
-    if USE_GEMINI and not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+    if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
         st.warning(
             "Set the GEMINI_API_KEY or GOOGLE_API_KEY environment variable before starting a chat.")
 
@@ -401,19 +499,18 @@ def main() -> None:
     else:
         relevant_chunks = retrieve_relevant_chunks(
             cleaned_query, st.session_state.knowledge_chunks)
-        assistant_reply = build_extractive_fallback(
-            cleaned_query, relevant_chunks)
-        if USE_GEMINI and (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+        if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+            assistant_reply = "Gemini API key not configured. Set GEMINI_API_KEY or GOOGLE_API_KEY and try again."
+        else:
             try:
-                gemini_reply = ask_pa_coach(
+                assistant_reply = ask_pa_coach(
                     cleaned_query,
                     relevant_chunks,
                     st.session_state.messages[:-1],
                 )
-                if gemini_reply and gemini_reply not in {OUT_OF_SCOPE, MISSING_INFO}:
-                    assistant_reply = gemini_reply
             except Exception:
-                pass
+                assistant_reply = build_extractive_fallback(
+                    cleaned_query, relevant_chunks)
 
         if assistant_reply == OUT_OF_SCOPE and asks_for_case_specific_details(cleaned_query):
             assistant_reply = MISSING_INFO
