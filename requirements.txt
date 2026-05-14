@@ -1,3 +1,4 @@
 streamlit>=1.50.0
 google-genai>=1.30.0
 pypdf>=5.0.0
+export GEMINI_API_KEY='AIzaSyC-Upt0LQFerov7DgvHZVSKELeSraYpcf0'
