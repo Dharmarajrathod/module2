@@ -455,10 +455,10 @@ def main() -> None:
     )
     st.caption(
         f"Knowledge source: `{st.session_state.knowledge_label or 'Not loaded'}` | "
-        f"Active model: `{DEFAULT_MODEL}`"
+        f"Answer mode: `{'Gemini grounded rewrite' if USE_GEMINI else 'Document extractive'}`"
     )
 
-    if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+    if USE_GEMINI and not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
         st.warning(
             "Set the GEMINI_API_KEY or GOOGLE_API_KEY environment variable before starting a chat.")
 
@@ -499,18 +499,19 @@ def main() -> None:
     else:
         relevant_chunks = retrieve_relevant_chunks(
             cleaned_query, st.session_state.knowledge_chunks)
-        if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
-            assistant_reply = "Gemini API key not configured. Set GEMINI_API_KEY or GOOGLE_API_KEY and try again."
-        else:
+        assistant_reply = build_extractive_fallback(
+            cleaned_query, relevant_chunks)
+        if USE_GEMINI and (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
             try:
-                assistant_reply = ask_pa_coach(
+                gemini_reply = ask_pa_coach(
                     cleaned_query,
                     relevant_chunks,
                     st.session_state.messages[:-1],
                 )
+                if gemini_reply and gemini_reply not in {OUT_OF_SCOPE, MISSING_INFO}:
+                    assistant_reply = gemini_reply
             except Exception:
-                assistant_reply = build_extractive_fallback(
-                    cleaned_query, relevant_chunks)
+                pass
 
         if assistant_reply == OUT_OF_SCOPE and asks_for_case_specific_details(cleaned_query):
             assistant_reply = MISSING_INFO
