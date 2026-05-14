@@ -21,7 +21,8 @@ SYSTEM_PROMPT = (
     "Documentation That Gets Approved content. Only answer using the provided "
     "PDF context. Do not use external knowledge. Do not generate or assume "
     "clinical facts. Always enforce documentation verification, chart review, "
-    "and evidence verification before submission."
+    "and evidence verification before submission. Format supported answers as "
+    "detailed point-wise bullets with clear headings when useful."
 )
 PHI_WARNING = "Remove real patient information. Use fictional or deidentified data."
 MISSING_INFO = "Please verify in the provider record."
@@ -172,7 +173,7 @@ def build_extractive_fallback(query: str, context_chunks: Sequence[Chunk]) -> st
         if len(top_sentences) >= MAX_FALLBACK_SENTENCES:
             break
 
-    return "Based on Module 2:\n\n- " + "\n- ".join(top_sentences)
+    return "Based on Module 2:\n\n1. " + "\n2. ".join(top_sentences)
 
 
 def likely_contains_phi(text: str) -> bool:
@@ -225,6 +226,9 @@ def build_grounded_prompt(user_query: str, context_chunks: Sequence[Chunk], hist
     context_block = (
         "Use only the following PDF excerpts as your knowledge source.\n\n"
         f"{context_text}\n\n"
+        "When the answer is supported, respond in detailed point-wise format. "
+        "Prefer numbered points, and break complex answers into sections like "
+        "definition, key elements, steps, examples, or cautions when the excerpts support them.\n"
         "If the user asks for case-specific or missing patient/provider record details "
         f"that are not in these excerpts, reply exactly with: \"{MISSING_INFO}\"\n"
         "If the question is outside Module 2 or not supported by these excerpts, reply "
